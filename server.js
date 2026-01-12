@@ -46,15 +46,53 @@ const transporter = nodemailer.createTransport({
 
 // --- AUTO DEPLOY SLASH COMMANDS ---
 const commands = [
-    new SlashCommandBuilder().setName('close-support').setDescription('Close session and delete thread'),
-    new SlashCommandBuilder().setName('questions-list').setDescription('Show available questions'),
-    new SlashCommandBuilder().setName('question').setDescription('Send Q').addIntegerOption(o => o.setName('id').setRequired(true)),
-    new SlashCommandBuilder().setName('backup').setDescription('Encrypted backup to DM (Requires OTP)'),
-    new SlashCommandBuilder().setName('delete-all').setDescription('Wipe database (Requires OTP)'),
-    new SlashCommandBuilder().setName('confirm-otp').setDescription('Verify OTP for system actions').addStringOption(o => o.setName('code').setRequired(true)),
-    new SlashCommandBuilder().setName('restore').setDescription('Restore data from encrypted file')
-        .addAttachmentOption(o => o.setName('file').setDescription('Backup JSON').setRequired(true))
-        .addStringOption(o => o.setName('otp').setDescription('Enter OTP from email').setRequired(true))
+    new SlashCommandBuilder()
+        .setName('close-support')
+        .setDescription('Close session and delete thread'),
+
+    new SlashCommandBuilder()
+        .setName('questions-list')
+        .setDescription('Show all available pre-defined questions'),
+
+    new SlashCommandBuilder()
+        .setName('question')
+        .setDescription('Send a pre-defined question to the customer') // Thêm mô tả ở đây
+        .addIntegerOption(opt => 
+            opt.setName('id')
+               .setDescription('Question ID (1-5)') // Thêm mô tả ở đây
+               .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('backup')
+        .setDescription('Generate an encrypted backup and send to your DM'),
+
+    new SlashCommandBuilder()
+        .setName('delete-all')
+        .setDescription('Wipe all ticket data from the database (Dangerous)'),
+
+    new SlashCommandBuilder()
+        .setName('confirm-otp')
+        .setDescription('Enter the OTP code received via email')
+        .addStringOption(opt => 
+            opt.setName('code')
+               .setDescription('The 6-digit verification code') // Thêm mô tả ở đây
+               .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('restore')
+        .setDescription('Restore database from an encrypted backup file')
+        .addAttachmentOption(opt => 
+            opt.setName('file')
+               .setDescription('Upload the PRMGVYT_BACKUP.json file') // Thêm mô tả ở đây
+               .setRequired(true)
+        )
+        .addStringOption(opt => 
+            opt.setName('otp')
+               .setDescription('Enter OTP from your email to authorize restore') // Thêm mô tả ở đây
+               .setRequired(true)
+        )
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
