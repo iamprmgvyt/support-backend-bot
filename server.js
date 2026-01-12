@@ -56,10 +56,10 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('question')
-        .setDescription('Send a pre-defined question to the customer') // Thêm mô tả ở đây
+        .setDescription('Send a pre-defined question to the customer')
         .addIntegerOption(opt => 
             opt.setName('id')
-               .setDescription('Question ID (1-5)') // Thêm mô tả ở đây
+               .setDescription('Question ID (1-5)')
                .setRequired(true)
         ),
 
@@ -76,7 +76,7 @@ const commands = [
         .setDescription('Enter the OTP code received via email')
         .addStringOption(opt => 
             opt.setName('code')
-               .setDescription('The 6-digit verification code') // Thêm mô tả ở đây
+               .setDescription('The 6-digit verification code')
                .setRequired(true)
         ),
 
@@ -85,12 +85,12 @@ const commands = [
         .setDescription('Restore database from an encrypted backup file')
         .addAttachmentOption(opt => 
             opt.setName('file')
-               .setDescription('Upload the PRMGVYT_BACKUP.json file') // Thêm mô tả ở đây
+               .setDescription('Upload the PRMGVYT_BACKUP.json file')
                .setRequired(true)
         )
         .addStringOption(opt => 
             opt.setName('otp')
-               .setDescription('Enter OTP from your email to authorize restore') // Thêm mô tả ở đây
+               .setDescription('Enter OTP from your email to authorize restore')
                .setRequired(true)
         )
 ].map(c => c.toJSON());
@@ -199,8 +199,6 @@ client.on('interactionCreate', async (i) => {
         const file = i.options.getAttachment('file');
         const otp = i.options.getString('otp');
         
-        // Giả lập check OTP đơn giản cho restore
-        // (Trong thực tế bạn nên gọi /backup-restore-otp riêng, nhưng đây là bản gộp nhanh)
         const response = await fetch(file.url);
         const encryptedText = await response.text();
 
