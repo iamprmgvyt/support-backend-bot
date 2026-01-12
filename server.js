@@ -54,12 +54,43 @@ const client = new Client({
     partials: [Partials.Channel] 
 });
 
-// --- API ENDPOINTS (Cloudflare Bypass) ---
-const getHeaders = () => ({
-    'Content-Type': 'application/json',
-    'User-Agent': process.env.CUSTOM_USER_AGENT || 'PRMGVYT-SUPPORT-BOT-SECURE'
+// --- HOME ROUTE (Trang chủ Bot) ---
+app.get('/', async (req, res) => {
+    try {
+        const totalTickets = await Ticket.countDocuments();
+        const activeTickets = await Ticket.countDocuments({ status: 'open' });
+        
+        res.send(`
+            <html>
+                <head>
+                    <title>PRMGVYT | Support Backend</title>
+                    <style>
+                        body { background: #05070a; color: #00ffa3; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                        .status-card { border: 1px solid #00ffa3; padding: 40px; border-radius: 20px; background: rgba(0, 255, 163, 0.05); box-shadow: 0 0 30px rgba(0, 255, 163, 0.1); text-align: center; max-width: 400px; }
+                        .dot { height: 12px; width: 12px; background-color: #00ffa3; border-radius: 50%; display: inline-block; animation: blink 1.5s infinite; }
+                        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.2; } 100% { opacity: 1; } }
+                        .stat { margin: 20px 0; font-size: 0.9rem; color: #fff; }
+                        .stat b { color: #00ffa3; }
+                        hr { border: 0; border-top: 1px solid rgba(0,255,163,0.2); margin: 20px 0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="status-card">
+                        <h2><span class="dot"></span> PRMGVYT PROTOCOL</h2>
+                        <p style="letter-spacing: 2px; font-size: 0.8rem;">BACKEND STATUS: OPERATIONAL</p>
+                        <hr>
+                        <div class="stat">Total Tickets: <b>${totalTickets}</b></div>
+                        <div class="stat">Active Sessions: <b>${activeTickets}</b></div>
+                        <hr>
+                        <p style="font-size: 0.7rem; color: rgba(255,255,255,0.4);">Targeting: support.prmgvyt.io.vn</p>
+                    </div>
+                </body>
+            </html>
+        `);
+    } catch (e) { res.send("System Error"); }
 });
 
+// --- API ENDPOINTS ---
 app.post('/api/tickets/start', async (req, res) => {
     try {
         const channel = await client.channels.fetch(process.env.SUPPORT_CHANNEL_ID);
@@ -72,7 +103,6 @@ app.post('/api/tickets/start', async (req, res) => {
     } catch (e) { res.json({ success: false }); }
 });
 
-// Quan trọng: API này dùng để Web lấy tin nhắn mới
 app.get('/api/tickets/history/:threadId', async (req, res) => {
     const ticket = await Ticket.findOne({ threadId: req.params.threadId });
     res.json({ 
@@ -83,11 +113,13 @@ app.get('/api/tickets/history/:threadId', async (req, res) => {
 });
 
 app.post('/api/tickets/send', async (req, res) => {
-    const { threadId, message, author } = req.body;
-    const thread = await client.channels.fetch(threadId);
-    await thread.send(`**${author}**: ${message}`);
-    await Ticket.findOneAndUpdate({ threadId }, { $push: { messages: { sender: author, content: message } } });
-    res.json({ success: true });
+    try {
+        const { threadId, message, author } = req.body;
+        const thread = await client.channels.fetch(threadId);
+        await thread.send(`**${author}**: ${message}`);
+        await Ticket.findOneAndUpdate({ threadId }, { $push: { messages: { sender: author, content: message } } });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false }); }
 });
 
 // --- DISCORD INTERACTION ---
@@ -123,4 +155,4 @@ client.on('messageCreate', async (msg) => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Server Live'));
