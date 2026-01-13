@@ -31,14 +31,20 @@ let tempOTP = { code: null, expires: null, action: null, data: null };
 
 // --- DATABASE SETUP ---
 mongoose.connect(process.env.MONGO_URI);
-const Ticket = mongoose.model('Ticket', new mongoose.Schema({
+
+const TicketSchema = new mongoose.Schema({
     threadId: { type: String, unique: true },
     userId: String,
     username: String,
     customerName: String,
     status: { type: String, default: 'open' },
-    messages: [{ sender: String, content: String, timestamp: { type: Date, default: Date.now } }]
-}));
+    messages: [{ 
+        sender: String, 
+        content: String, 
+        timestamp: { type: Date, default: Date.now } 
+    }]
+});
+const Ticket = mongoose.model('Ticket', TicketSchema);
 
 const Blacklist = mongoose.model('Blacklist', new mongoose.Schema({
     userId: { type: String, unique: true },
@@ -51,7 +57,7 @@ const transporter = nodemailer.createTransport({
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
 });
 
-// --- AUTO DEPLOY SLASH COMMANDS ---
+// --- DISCORD SLASH COMMANDS DEPLOYMENT ---
 const commands = [
     new SlashCommandBuilder().setName('close-support').setDescription('Close session and delete thread'),
     new SlashCommandBuilder().setName('questions-list').setDescription('Show all available pre-defined questions'),
@@ -68,8 +74,8 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 (async () => {
     try {
         await rest.put(Routes.applicationGuildCommands(BOT_ID, GUILD_ID), { body: commands });
-        console.log('✅ Commands Updated with Ban System');
-    } catch (e) { console.error(e); }
+        console.log('✅ Global Slash Commands Synchronized');
+    } catch (e) { console.error('❌ Command Deploy Error:', e); }
 })();
 
 const client = new Client({ 
@@ -85,11 +91,26 @@ const generateOTP = async (action, data = null) => {
         from: process.env.EMAIL_USER,
         to: process.env.ADMIN_EMAIL,
         subject: `[SECURITY ALERT] OTP for ${action.toUpperCase()}`,
-        html: `<h2>Code: <span style="color:#00ffa3;">${code}</span></h2>`
+        html: `<div style="font-family:sans-serif; padding:20px; border:1px solid #00ffa3;">
+                <h2>Security Code Request</h2>
+                <p>An administrative action <b>${action}</b> has been requested.</p>
+                <h1 style="color:#00ffa3; letter-spacing:5px;">${code}</h1>
+                <p>This code expires in 10 minutes.</p>
+               </div>`
     });
 };
 
-// --- AUTH: DISCORD OAUTH2 ---
+// --- API: AUTHENTICATION & CALLBACK ---
+
+// 1. Discord OAuth2 Callback (Trình duyệt sẽ chuyển hướng về đây)
+app.get('/api/auth/callback', (req, res) => {
+    const code = req.query.code;
+    if (!code) return res.status(400).send("No authorization code provided.");
+    // Chuyển hướng về trang chủ kèm theo code để Frontend xử lý tiếp
+    res.redirect(`https://support-bot.prmgvyt.io.vn/?code=${code}`);
+});
+
+// 2. Exchange Code for User Data
 app.post('/api/auth/discord', async (req, res) => {
     const { code } = req.body;
     try {
@@ -106,16 +127,29 @@ app.post('/api/auth/discord', async (req, res) => {
         });
 
         res.json({ success: true, user: userRes.data });
-    } catch (e) { res.status(401).json({ success: false }); }
+    } catch (e) { 
+        console.error(e.response?.data || e.message);
+        res.status(401).json({ success: false }); 
+    }
 });
 
-// --- API ENDPOINTS ---
+// --- API: TICKET CORE ---
+
+// 3. Lấy log cũ của User (Dùng cho Main Page)
+app.get('/api/tickets/user/:userId', async (req, res) => {
+    try {
+        const tickets = await Ticket.find({ userId: req.params.userId }).sort({ _id: -1 }).limit(5);
+        res.json({ success: true, tickets });
+    } catch (e) { res.status(500).json({ success: false }); }
+});
+
+// 4. Khởi tạo Ticket mới
 app.post('/api/tickets/start', async (req, res) => {
     try {
         const { name, userId, username, avatar, banner } = req.body;
 
         const isBanned = await Blacklist.findOne({ userId });
-        if (isBanned) return res.status(403).json({ success: false, message: "User is banned." });
+        if (isBanned) return res.status(403).json({ success: false, message: `ACCESS DENIED: You are banned. Reason: ${isBanned.reason}` });
 
         const channel = await client.channels.fetch(process.env.SUPPORT_CHANNEL_ID);
         const vnTime = new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" });
@@ -140,12 +174,14 @@ app.post('/api/tickets/start', async (req, res) => {
 
         await thread.send({ embeds: [infoEmbed] });
 
-        await new Ticket({ 
+        const newTicket = new Ticket({ 
             threadId: thread.id, 
             userId, 
             username, 
-            customerName: name 
-        }).save();
+            customerName: name,
+            messages: [{ sender: 'System', content: 'Connection Established' }]
+        });
+        await newTicket.save();
 
         res.json({ success: true, threadId: thread.id });
     } catch (e) { res.json({ success: false }); }
@@ -166,14 +202,15 @@ app.post('/api/tickets/send', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// --- DISCORD INTERACTION ---
+// --- DISCORD BOT LOGIC ---
+
 client.on('interactionCreate', async (i) => {
     if (!i.isChatInputCommand()) return;
     if (i.user.id !== ADMIN_ID) return i.reply({ content: "❌ Unauthorized.", ephemeral: true });
 
     if (i.commandName === 'ban-user') {
         const userId = i.options.getString('userid');
-        const reason = i.options.getString('reason') || 'No reason';
+        const reason = i.options.getString('reason') || 'No reason specified';
         await Blacklist.findOneAndUpdate({ userId }, { reason }, { upsert: true });
         return i.reply(`✅ Banned <@${userId}> (\`${userId}\`). Reason: ${reason}`);
     }
@@ -181,17 +218,17 @@ client.on('interactionCreate', async (i) => {
     if (i.commandName === 'unban-user') {
         const userId = i.options.getString('userid');
         await Blacklist.deleteOne({ userId });
-        return i.reply(`✅ Unbanned \`${userId}\`.`);
+        return i.reply(`✅ User \`${userId}\` has been removed from blacklist.`);
     }
 
     if (i.commandName === 'backup' || i.commandName === 'delete-all') {
         await generateOTP(i.commandName);
-        return i.reply({ content: `🔐 OTP sent to email. Use \`/confirm-otp\`.`, ephemeral: true });
+        return i.reply({ content: `🔐 Security OTP sent to Admin Email. Use \`/confirm-otp\` to execute.`, ephemeral: true });
     }
 
     if (i.commandName === 'confirm-otp') {
         const code = i.options.getString('code');
-        if (!tempOTP.code || Date.now() > tempOTP.expires || code !== tempOTP.code) return i.reply("❌ Invalid OTP.");
+        if (!tempOTP.code || Date.now() > tempOTP.expires || code !== tempOTP.code) return i.reply("❌ Invalid or expired OTP.");
 
         const action = tempOTP.action;
         tempOTP = { code: null };
@@ -199,44 +236,45 @@ client.on('interactionCreate', async (i) => {
         if (action === 'backup') {
             const data = await Ticket.find();
             const encrypted = CryptoJS.AES.encrypt(JSON.stringify(data), process.env.BACKUP_ENCRYPTION_KEY).toString();
-            const attachment = new AttachmentBuilder(Buffer.from(encrypted, 'utf-8'), { name: `BACKUP_${Date.now()}.json` });
+            const attachment = new AttachmentBuilder(Buffer.from(encrypted, 'utf-8'), { name: `DATABASE_BACKUP_${Date.now()}.json` });
             
             try {
-                await i.user.send({ content: "📦 Encrypted Backup:", files: [attachment] });
-                return i.reply({ content: "✅ Check your DM.", ephemeral: true });
+                await i.user.send({ content: "📦 **ENCRYPTED DATABASE BACKUP**\nKeep this file safe for restoration.", files: [attachment] });
+                return i.reply({ content: "✅ Backup sent to your DM.", ephemeral: true });
             } catch (e) {
-                return i.reply({ content: "❌ Cannot send DM. Open your DM settings.", ephemeral: true });
+                return i.reply({ content: "❌ Failed to send DM. Check your Privacy Settings.", ephemeral: true });
             }
         }
 
         if (action === 'delete-all') {
             await Ticket.deleteMany({});
-            return i.reply("💥 Database wiped.");
+            return i.reply("💥 **SYSTEM WIPE COMPLETE**: All tickets deleted from database.");
         }
     }
 
     if (i.commandName === 'restore') {
         const file = i.options.getAttachment('file');
-        const otp = i.options.getString('otp');
-        const response = await fetch(file.url);
-        const encryptedText = await response.text();
+        const otp = i.options.getString('otp'); // Optional OTP verification
+        
         try {
-            const bytes = CryptoJS.AES.decrypt(encryptedText, process.env.BACKUP_ENCRYPTION_KEY);
+            const response = await axios.get(file.url);
+            const bytes = CryptoJS.AES.decrypt(response.data, process.env.BACKUP_ENCRYPTION_KEY);
             const decryptedData = JSON.parse(bytes.toString(CryptoJS.enc.Utf8));
+            
             await Ticket.deleteMany({});
             await Ticket.insertMany(decryptedData);
-            return i.reply("✅ Restore successful.");
-        } catch (e) { return i.reply("❌ Restore failed."); }
+            return i.reply("✅ **RESTORE SUCCESSFUL**: Database state recovered.");
+        } catch (e) { return i.reply("❌ **RESTORE FAILED**: File corrupted or wrong encryption key."); }
     }
 
     if (i.commandName === 'questions-list') {
-        let list = "**Questions:**\n" + Object.entries(QUESTIONS).map(([id, text]) => `**${id}**: ${text}`).join('\n');
+        let list = "### 📝 Available Questions:\n" + Object.entries(QUESTIONS).map(([id, text]) => `**${id}**: ${text}`).join('\n');
         return i.reply({ content: list, ephemeral: true });
     }
 
     if (i.commandName === 'close-support') {
         await Ticket.findOneAndUpdate({ threadId: i.channelId }, { status: 'closed' });
-        await i.reply('🔒 Closing in 5s...');
+        await i.reply('🔒 **SESSION TERMINATED**: Deleting thread in 5s...');
         setTimeout(() => i.channel.delete().catch(() => {}), 5000);
     }
 
@@ -245,15 +283,18 @@ client.on('interactionCreate', async (i) => {
         if (QUESTIONS[id]) {
             const qText = `📝 PRE-SUPPORT QUESTION: ${QUESTIONS[id]}`;
             await Ticket.findOneAndUpdate({ threadId: i.channelId }, { $push: { messages: { sender: 'System', content: qText } } });
-            return i.reply({ content: `✅ Sent Q#${id}`, ephemeral: true });
+            return i.reply({ content: `✅ Sent Question #${id}`, ephemeral: true });
         }
     }
 });
 
+// Lưu tin nhắn từ Admin trong Thread vào Database
 client.on('messageCreate', async (msg) => {
     if (msg.author.bot || !msg.channel.isThread() || msg.content.startsWith('/')) return;
     await Ticket.findOneAndUpdate({ threadId: msg.channelId }, { $push: { messages: { sender: 'Admin', content: msg.content } } });
 });
 
 client.login(process.env.DISCORD_TOKEN);
-app.listen(process.env.PORT || 3000);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Terminal Server running on port ${PORT}`));
