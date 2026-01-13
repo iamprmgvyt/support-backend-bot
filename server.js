@@ -8,6 +8,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const CryptoJS = require('crypto-js');
+const axios = require('axios');
 
 const app = express();
 app.use(cors());
@@ -32,14 +33,13 @@ let tempOTP = { code: null, expires: null, action: null, data: null };
 mongoose.connect(process.env.MONGO_URI);
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({
     threadId: { type: String, unique: true },
-    userId: String, // Lưu Discord ID người dùng
-    username: String, // Lưu Discord Username
+    userId: String,
+    username: String,
     customerName: String,
     status: { type: String, default: 'open' },
     messages: [{ sender: String, content: String, timestamp: { type: Date, default: Date.now } }]
 }));
 
-// Thêm Schema Blacklist
 const Blacklist = mongoose.model('Blacklist', new mongoose.Schema({
     userId: { type: String, unique: true },
     reason: String,
@@ -60,7 +60,6 @@ const commands = [
     new SlashCommandBuilder().setName('delete-all').setDescription('Wipe all ticket data'),
     new SlashCommandBuilder().setName('confirm-otp').setDescription('Verify OTP code').addStringOption(opt => opt.setName('code').setDescription('6-digit code').setRequired(true)),
     new SlashCommandBuilder().setName('restore').setDescription('Restore from file').addAttachmentOption(opt => opt.setName('file').setDescription('Backup JSON').setRequired(true)).addStringOption(opt => opt.setName('otp').setDescription('Enter OTP').setRequired(true)),
-    // Lệnh quản lý mới
     new SlashCommandBuilder().setName('ban-user').setDescription('Ban user from support').addStringOption(opt => opt.setName('userid').setDescription('Discord ID').setRequired(true)).addStringOption(opt => opt.setName('reason').setDescription('Reason')),
     new SlashCommandBuilder().setName('unban-user').setDescription('Unban user').addStringOption(opt => opt.setName('userid').setDescription('Discord ID').setRequired(true))
 ].map(c => c.toJSON());
@@ -90,18 +89,35 @@ const generateOTP = async (action, data = null) => {
     });
 };
 
+// --- AUTH: DISCORD OAUTH2 ---
+app.post('/api/auth/discord', async (req, res) => {
+    const { code } = req.body;
+    try {
+        const tokenRes = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
+            client_id: process.env.DISCORD_CLIENT_ID,
+            client_secret: process.env.DISCORD_CLIENT_SECRET,
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: process.env.DISCORD_REDIRECT_URI,
+        }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+        const userRes = await axios.get('https://discord.com/api/users/@me', {
+            headers: { Authorization: `Bearer ${tokenRes.data.access_token}` }
+        });
+
+        res.json({ success: true, user: userRes.data });
+    } catch (e) { res.status(401).json({ success: false }); }
+});
+
 // --- API ENDPOINTS ---
 app.post('/api/tickets/start', async (req, res) => {
     try {
-        const { name, userId, username, avatar } = req.body;
+        const { name, userId, username, avatar, banner } = req.body;
 
-        // 1. Kiểm tra Ban
         const isBanned = await Blacklist.findOne({ userId });
         if (isBanned) return res.status(403).json({ success: false, message: "User is banned." });
 
         const channel = await client.channels.fetch(process.env.SUPPORT_CHANNEL_ID);
-        
-        // 2. Lấy giờ Việt Nam (ICT)
         const vnTime = new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" });
 
         const thread = await channel.threads.create({ 
@@ -109,11 +125,11 @@ app.post('/api/tickets/start', async (req, res) => {
             type: ChannelType.PublicThread 
         });
 
-        // 3. Tạo Embed thông tin chi tiết
         const infoEmbed = new EmbedBuilder()
             .setTitle('🎫 New Session Activated')
             .setColor('#00ffa3')
-            .setThumbnail(avatar || null)
+            .setThumbnail(avatar ? `https://cdn.discordapp.com/avatars/${userId}/${avatar}.png` : null)
+            .setImage(banner ? `https://cdn.discordapp.com/banners/${userId}/${banner}.png` : null)
             .addFields(
                 { name: '👤 Customer Name', value: name, inline: true },
                 { name: '🆔 Discord ID', value: `\`${userId}\``, inline: true },
@@ -135,7 +151,6 @@ app.post('/api/tickets/start', async (req, res) => {
     } catch (e) { res.json({ success: false }); }
 });
 
-// (Các API Get History và Send Message giữ nguyên như code bạn đưa)
 app.get('/api/tickets/history/:threadId', async (req, res) => {
     const ticket = await Ticket.findOne({ threadId: req.params.threadId });
     res.json({ success: true, messages: ticket ? ticket.messages : [], status: ticket ? ticket.status : 'closed' });
@@ -156,7 +171,6 @@ client.on('interactionCreate', async (i) => {
     if (!i.isChatInputCommand()) return;
     if (i.user.id !== ADMIN_ID) return i.reply({ content: "❌ Unauthorized.", ephemeral: true });
 
-    // BAN USER LOGIC
     if (i.commandName === 'ban-user') {
         const userId = i.options.getString('userid');
         const reason = i.options.getString('reason') || 'No reason';
@@ -170,7 +184,6 @@ client.on('interactionCreate', async (i) => {
         return i.reply(`✅ Unbanned \`${userId}\`.`);
     }
 
-    // BACKUP LOGIC (Sửa lỗi gửi DM)
     if (i.commandName === 'backup' || i.commandName === 'delete-all') {
         await generateOTP(i.commandName);
         return i.reply({ content: `🔐 OTP sent to email. Use \`/confirm-otp\`.`, ephemeral: true });
@@ -216,7 +229,6 @@ client.on('interactionCreate', async (i) => {
         } catch (e) { return i.reply("❌ Restore failed."); }
     }
 
-    // Các lệnh Question và Close cũ giữ nguyên
     if (i.commandName === 'questions-list') {
         let list = "**Questions:**\n" + Object.entries(QUESTIONS).map(([id, text]) => `**${id}**: ${text}`).join('\n');
         return i.reply({ content: list, ephemeral: true });
