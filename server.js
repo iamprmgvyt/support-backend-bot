@@ -26,19 +26,26 @@ const QUESTIONS = {
     "5": "What steps have you already taken to try and resolve the issue?"
 };
 
-// Biến tạm lưu OTP
 let tempOTP = { code: null, expires: null, action: null, data: null };
 
 // --- DATABASE SETUP ---
 mongoose.connect(process.env.MONGO_URI);
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({
     threadId: { type: String, unique: true },
+    userId: String, // Lưu Discord ID người dùng
+    username: String, // Lưu Discord Username
     customerName: String,
     status: { type: String, default: 'open' },
     messages: [{ sender: String, content: String, timestamp: { type: Date, default: Date.now } }]
 }));
 
-// --- NODEMAILER SETUP ---
+// Thêm Schema Blacklist
+const Blacklist = mongoose.model('Blacklist', new mongoose.Schema({
+    userId: { type: String, unique: true },
+    reason: String,
+    timestamp: { type: Date, default: Date.now }
+}));
+
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
@@ -46,60 +53,23 @@ const transporter = nodemailer.createTransport({
 
 // --- AUTO DEPLOY SLASH COMMANDS ---
 const commands = [
-    new SlashCommandBuilder()
-        .setName('close-support')
-        .setDescription('Close session and delete thread'),
-
-    new SlashCommandBuilder()
-        .setName('questions-list')
-        .setDescription('Show all available pre-defined questions'),
-
-    new SlashCommandBuilder()
-        .setName('question')
-        .setDescription('Send a pre-defined question to the customer')
-        .addIntegerOption(opt => 
-            opt.setName('id')
-               .setDescription('Question ID (1-5)')
-               .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('backup')
-        .setDescription('Generate an encrypted backup and send to your DM'),
-
-    new SlashCommandBuilder()
-        .setName('delete-all')
-        .setDescription('Wipe all ticket data from the database (Dangerous)'),
-
-    new SlashCommandBuilder()
-        .setName('confirm-otp')
-        .setDescription('Enter the OTP code received via email')
-        .addStringOption(opt => 
-            opt.setName('code')
-               .setDescription('The 6-digit verification code')
-               .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName('restore')
-        .setDescription('Restore database from an encrypted backup file')
-        .addAttachmentOption(opt => 
-            opt.setName('file')
-               .setDescription('Upload the PRMGVYT_BACKUP.json file')
-               .setRequired(true)
-        )
-        .addStringOption(opt => 
-            opt.setName('otp')
-               .setDescription('Enter OTP from your email to authorize restore')
-               .setRequired(true)
-        )
+    new SlashCommandBuilder().setName('close-support').setDescription('Close session and delete thread'),
+    new SlashCommandBuilder().setName('questions-list').setDescription('Show all available pre-defined questions'),
+    new SlashCommandBuilder().setName('question').setDescription('Send a pre-defined question').addIntegerOption(opt => opt.setName('id').setDescription('Question ID (1-5)').setRequired(true)),
+    new SlashCommandBuilder().setName('backup').setDescription('Generate an encrypted backup'),
+    new SlashCommandBuilder().setName('delete-all').setDescription('Wipe all ticket data'),
+    new SlashCommandBuilder().setName('confirm-otp').setDescription('Verify OTP code').addStringOption(opt => opt.setName('code').setDescription('6-digit code').setRequired(true)),
+    new SlashCommandBuilder().setName('restore').setDescription('Restore from file').addAttachmentOption(opt => opt.setName('file').setDescription('Backup JSON').setRequired(true)).addStringOption(opt => opt.setName('otp').setDescription('Enter OTP').setRequired(true)),
+    // Lệnh quản lý mới
+    new SlashCommandBuilder().setName('ban-user').setDescription('Ban user from support').addStringOption(opt => opt.setName('userid').setDescription('Discord ID').setRequired(true)).addStringOption(opt => opt.setName('reason').setDescription('Reason')),
+    new SlashCommandBuilder().setName('unban-user').setDescription('Unban user').addStringOption(opt => opt.setName('userid').setDescription('Discord ID').setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 (async () => {
     try {
         await rest.put(Routes.applicationGuildCommands(BOT_ID, GUILD_ID), { body: commands });
-        console.log('✅ Advanced Admin Commands Updated');
+        console.log('✅ Commands Updated with Ban System');
     } catch (e) { console.error(e); }
 })();
 
@@ -111,41 +81,61 @@ const client = new Client({
 // --- UTILS ---
 const generateOTP = async (action, data = null) => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    tempOTP = { code, expires: Date.now() + 600000, action, data }; // 10 phút
+    tempOTP = { code, expires: Date.now() + 600000, action, data };
     await transporter.sendMail({
         from: process.env.EMAIL_USER,
         to: process.env.ADMIN_EMAIL,
         subject: `[SECURITY ALERT] OTP for ${action.toUpperCase()}`,
-        html: `<div style="font-family:sans-serif;border:1px solid #00ffa3;padding:20px;">
-                <h2>Verification Code: <span style="color:#00ffa3;">${code}</span></h2>
-                <p>This code is for <b>${action}</b> and expires in 10 minutes.</p>
-               </div>`
+        html: `<h2>Code: <span style="color:#00ffa3;">${code}</span></h2>`
     });
 };
-
-// --- HOME ROUTE ---
-app.get('/', async (req, res) => {
-    try {
-        const totalTickets = await Ticket.countDocuments();
-        const activeTickets = await Ticket.countDocuments({ status: 'open' });
-        res.send(`<body style="background:#05070a;color:#00ffa3;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;">
-            <div style="border:1px solid #00ffa3;padding:40px;text-align:center;">
-                <h2>PRMGVYT PROTOCOL ACTIVE</h2>
-                <p>DATABASE: CONNECTED | TICKETS: ${totalTickets} | ACTIVE: ${activeTickets}</p>
-            </div></body>`);
-    } catch (e) { res.send("Error"); }
-});
 
 // --- API ENDPOINTS ---
 app.post('/api/tickets/start', async (req, res) => {
     try {
+        const { name, userId, username, avatar } = req.body;
+
+        // 1. Kiểm tra Ban
+        const isBanned = await Blacklist.findOne({ userId });
+        if (isBanned) return res.status(403).json({ success: false, message: "User is banned." });
+
         const channel = await client.channels.fetch(process.env.SUPPORT_CHANNEL_ID);
-        const thread = await channel.threads.create({ name: `🔴 Support - ${req.body.name}`, type: ChannelType.PublicThread });
-        await new Ticket({ threadId: thread.id, customerName: req.body.name }).save();
+        
+        // 2. Lấy giờ Việt Nam (ICT)
+        const vnTime = new Date().toLocaleString("en-GB", { timeZone: "Asia/Ho_Chi_Minh" });
+
+        const thread = await channel.threads.create({ 
+            name: `🔴 ${username} - ${name}`, 
+            type: ChannelType.PublicThread 
+        });
+
+        // 3. Tạo Embed thông tin chi tiết
+        const infoEmbed = new EmbedBuilder()
+            .setTitle('🎫 New Session Activated')
+            .setColor('#00ffa3')
+            .setThumbnail(avatar || null)
+            .addFields(
+                { name: '👤 Customer Name', value: name, inline: true },
+                { name: '🆔 Discord ID', value: `\`${userId}\``, inline: true },
+                { name: '🏷️ Discord Tag', value: username, inline: true },
+                { name: '⏰ Created At (VN)', value: vnTime }
+            )
+            .setFooter({ text: 'PRMGVYT Security Protocol' });
+
+        await thread.send({ embeds: [infoEmbed] });
+
+        await new Ticket({ 
+            threadId: thread.id, 
+            userId, 
+            username, 
+            customerName: name 
+        }).save();
+
         res.json({ success: true, threadId: thread.id });
     } catch (e) { res.json({ success: false }); }
 });
 
+// (Các API Get History và Send Message giữ nguyên như code bạn đưa)
 app.get('/api/tickets/history/:threadId', async (req, res) => {
     const ticket = await Ticket.findOne({ threadId: req.params.threadId });
     res.json({ success: true, messages: ticket ? ticket.messages : [], status: ticket ? ticket.status : 'closed' });
@@ -164,59 +154,71 @@ app.post('/api/tickets/send', async (req, res) => {
 // --- DISCORD INTERACTION ---
 client.on('interactionCreate', async (i) => {
     if (!i.isChatInputCommand()) return;
-    if (i.user.id !== ADMIN_ID) return i.reply({ content: "❌ Unauthorized Access.", ephemeral: true });
+    if (i.user.id !== ADMIN_ID) return i.reply({ content: "❌ Unauthorized.", ephemeral: true });
 
-    // 1. BACKUP & DELETE REQUEST
-    if (i.commandName === 'backup' || i.commandName === 'delete-all') {
-        await generateOTP(i.commandName);
-        return i.reply({ content: `🔐 OTP sent to your email. Use \`/confirm-otp\` to finish **${i.commandName}**.`, ephemeral: true });
+    // BAN USER LOGIC
+    if (i.commandName === 'ban-user') {
+        const userId = i.options.getString('userid');
+        const reason = i.options.getString('reason') || 'No reason';
+        await Blacklist.findOneAndUpdate({ userId }, { reason }, { upsert: true });
+        return i.reply(`✅ Banned <@${userId}> (\`${userId}\`). Reason: ${reason}`);
     }
 
-    // 2. CONFIRM OTP (FOR BACKUP / DELETE)
+    if (i.commandName === 'unban-user') {
+        const userId = i.options.getString('userid');
+        await Blacklist.deleteOne({ userId });
+        return i.reply(`✅ Unbanned \`${userId}\`.`);
+    }
+
+    // BACKUP LOGIC (Sửa lỗi gửi DM)
+    if (i.commandName === 'backup' || i.commandName === 'delete-all') {
+        await generateOTP(i.commandName);
+        return i.reply({ content: `🔐 OTP sent to email. Use \`/confirm-otp\`.`, ephemeral: true });
+    }
+
     if (i.commandName === 'confirm-otp') {
         const code = i.options.getString('code');
-        if (!tempOTP.code || Date.now() > tempOTP.expires || code !== tempOTP.code) return i.reply("❌ Invalid/Expired OTP.");
+        if (!tempOTP.code || Date.now() > tempOTP.expires || code !== tempOTP.code) return i.reply("❌ Invalid OTP.");
 
         const action = tempOTP.action;
-        tempOTP = { code: null, expires: null, action: null };
+        tempOTP = { code: null };
 
         if (action === 'backup') {
             const data = await Ticket.find();
             const encrypted = CryptoJS.AES.encrypt(JSON.stringify(data), process.env.BACKUP_ENCRYPTION_KEY).toString();
-            const attachment = new AttachmentBuilder(Buffer.from(encrypted, 'utf-8'), { name: `PRMGVYT_BACKUP_${Date.now()}.json` });
-            await i.user.send({ content: "📦 **Encrypted Backup File**\nKeep this file and your encryption key safe.", files: [attachment] });
-            return i.reply("✅ Backup encrypted and sent to your DM.");
+            const attachment = new AttachmentBuilder(Buffer.from(encrypted, 'utf-8'), { name: `BACKUP_${Date.now()}.json` });
+            
+            try {
+                await i.user.send({ content: "📦 Encrypted Backup:", files: [attachment] });
+                return i.reply({ content: "✅ Check your DM.", ephemeral: true });
+            } catch (e) {
+                return i.reply({ content: "❌ Cannot send DM. Open your DM settings.", ephemeral: true });
+            }
         }
 
         if (action === 'delete-all') {
             await Ticket.deleteMany({});
-            return i.reply("💥 **SYSTEM WIPE COMPLETE.** All sessions and tickets deleted.");
+            return i.reply("💥 Database wiped.");
         }
     }
 
-    // 3. RESTORE (Mã hóa + OTP trực tiếp)
     if (i.commandName === 'restore') {
         const file = i.options.getAttachment('file');
         const otp = i.options.getString('otp');
-        
         const response = await fetch(file.url);
         const encryptedText = await response.text();
-
         try {
             const bytes = CryptoJS.AES.decrypt(encryptedText, process.env.BACKUP_ENCRYPTION_KEY);
             const decryptedData = JSON.parse(bytes.toString(CryptoJS.enc.Utf8));
-
-            await Ticket.deleteMany({}); // Xóa cũ
-            await Ticket.insertMany(decryptedData); // Nạp mới
-            return i.reply("✅ **RESTORE SUCCESSFUL.** Database has been repopulated.");
-        } catch (e) {
-            return i.reply("❌ **RESTORE FAILED.** Wrong key or corrupted file.");
-        }
+            await Ticket.deleteMany({});
+            await Ticket.insertMany(decryptedData);
+            return i.reply("✅ Restore successful.");
+        } catch (e) { return i.reply("❌ Restore failed."); }
     }
 
-    // CÁC LỆNH CŨ
+    // Các lệnh Question và Close cũ giữ nguyên
     if (i.commandName === 'questions-list') {
-        let list = "**Available Questions:**\n" + Object.entries(QUESTIONS).map(([id, text]) => `**${id}**: ${text}`).join('\n');
+        let list = "**Questions:**\n" + Object.entries(QUESTIONS).map(([id, text]) => `**${id}**: ${text}`).join('\n');
         return i.reply({ content: list, ephemeral: true });
     }
 
